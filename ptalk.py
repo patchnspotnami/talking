@@ -27,7 +27,7 @@ input_queue = queue.Queue(maxsize=65) #input buffer for get next audio
 client = OpenAI() # initialise chatgpt, OPENAI_KEY is stored as an environment variable
 
 
-owwModel = Model(wakeword_models=["hay_Patch_medium.tflite"], inference_framework = "tflite"  ) # openwakeword model
+owwModel = Model(wakeword_models=["hay_Patch_large.tflite"], inference_framework = "tflite"  ) # openwakeword model
 
 voicedir = os.path.expanduser('~/') #Where piper onnx model files are stored
 piper_model = voicedir+"en_GB-northern_english_male-medium.onnx"
@@ -45,7 +45,7 @@ FORMAT = pyaudio.paInt16  #historical constants
 CHANNELS = 1
 RATE= 16000
 
-pause_time = 1.5 #time before end of conversation
+pause_time = 3 #time seconds before end of conversation
 
 patch_talking = threading.Event()  #flag to set whilst patch is talking, communicate between threads
 
@@ -76,7 +76,7 @@ def jspeak_syn(jimtext):  # from post by JosieEliliel   https://github.com/rhass
 
 
 def speak_greeting():
-    jspeak_syn("Yep")
+    jspeak_syn("Yep, how can I help")
 
 
 
@@ -85,7 +85,9 @@ def jspeak():  # seperate thread
 
         jaud = speak_queue.get() # wait until something appears in the queue
         patch_talking.set() # set the patch_talking flag to True
-        stream.write(jaud) # send it off to the loudspeaker 
+        stream.write(jaud) # send it off to the loudspeaker
+        while (not input_queue.empty()):
+            jdiscard = input_queue.get() # empty input queue so no hung over speach
         patch_talking.clear() # set the patch_talking flag to False
         
        
@@ -123,7 +125,7 @@ def jask(jmes):
 
 
 def get_next_audio_frame():
-
+# historical function, not used anymore
     return input_queue.get()
 
 
@@ -134,23 +136,18 @@ def callback(indata, frames, time, status):
     if not patch_talking.is_set():  # exclude when patch is talking, if patch talking, discard data
         input_queue.put(bytes(indata))
 
-
-
-
-
 def ending():
     stream.stop()
     stream.close()
-
     print("ended ok")
 
-def jimain():
+def jimain():  # main thread 
     jbrief = "give a brief reply to "
     con_level = 0.65 # confidece level for speaker id match
     global jprompt
     global start_time  # so we can share start_time with jask
     
-    with sd.RawInputStream(samplerate=jsamp_rate, blocksize = (512), device=None, dtype="int16", channels=1, callback=callback):
+    with sd.RawInputStream(samplerate=jsamp_rate, blocksize = (512), device=None, dtype="int16", channels=1, callback=callback):  # set inout stream going
         rec = vosk.KaldiRecognizer(vosk_model, jsamp_rate)
         while True:
             pcm = np.frombuffer(get_next_audio_frame(), dtype=np.int16)
@@ -158,9 +155,12 @@ def jimain():
             jans = "" # initialise the anwer
             print("listening")
             prediction = owwModel.predict(pcm) #wake word detected?
-            print ("prediction .. ", prediction['hay_Patch_medium'])
+            print ("prediction .. ", prediction['hay_Patch_large'])
 
-            if (prediction['hay_Patch_medium'] > 0.15): #result >= 0.2:  #wake word detected, started conversation
+            if (prediction['hay_Patch_large'] > 0.5):  #wake word detected, started conversation
+                for x in range(10):
+                    pcm = np.frombuffer(get_next_audio_frame(), dtype=np.int16) #dirty fix, clean out owwModel buffer so
+                    jprediction = owwModel.predict(pcm) #go past wake word
                 speak_greeting()
                 start_time = time.time() # remember start time
                 while ((time.time() - start_time) < pause_time): #still in conversation
@@ -174,24 +174,17 @@ def jimain():
 
                         data = bytes(get_next_audio_frame())
                         if rec.AcceptWaveform(data):  #reached break now respond
-                
-         
                             truncate_recresult =  rec.Result().replace('"text" :', ' ')
                             print ("truncate.. ", truncate_recresult, len(truncate_recresult))
-#                            time.sleep(54)
+#                           
                             if not len(truncate_recresult) <12: # check not empty, len = 10 when empty
                                 jans = f"{jbrief} {truncate_recresult}" # tack briefly onto front of input
-                           
-                           
-
-                           
                                 jqes ={"role": "user", "content": jans} # format the question properly 
                                 jprompt.append(jqes) # format prompt properly
                                 whole_reply = jask(jprompt) # ask gpt and speak result
                             jprompt = [] # clean out jprompt. only use it once
                             
                         else:
-                            
                             print ("partial..", rec.PartialResult())
                             if '"partial" : ""' not in  rec.PartialResult(): # some text coming in
                                 start_time = time.time() # reset start time as talking
