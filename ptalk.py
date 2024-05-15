@@ -2,9 +2,10 @@ from openai import OpenAI
 
 import queue 
 import threading
-
+import serial
 from piper.voice import PiperVoice
 
+import re # to parse response from gpt4
 import pyaudio
 import numpy as np
 import sys
@@ -26,7 +27,7 @@ input_queue = queue.Queue(maxsize=65) #input buffer for get next audio
 
 client = OpenAI() # initialise chatgpt, OPENAI_KEY is stored as an environment variable
 
-
+ser = serial.Serial('/dev/ttyACM0', 9600, timeout = 1) # start serial to arduino
 owwModel = Model(wakeword_models=["hay_Patch_large.tflite"], inference_framework = "tflite"  ) # openwakeword model
 
 voicedir = os.path.expanduser('~/') #Where piper onnx model files are stored
@@ -59,17 +60,36 @@ start_time = time.time() # declare start_time so we can use it as a global varia
 
 
 
-jprompt = [
-    {"role": "system", "content": "You are  Patch, an intelligent and compassionate giraffe.  Patch likes to go out and see new things, he enjoys eating leaves from tall trees. He would like to meet other giraffes, but there are not any where he lives, in Kaleen part of the Australian Capital Territory. He does meet lots of dogs and enjoys playing with them.  When he comes home he loves having his tummy rubbed and hanging out with his friend Jimmy."},
+jprompt_base = [  # sets the context
+    {"role": "system", "content": "You are  Patch, an intelligent and compassionate giraffe.  Patch likes to go out and see new things, he enjoys eating leaves from tall trees. He would like to meet other giraffes, but there are not any where he lives, in Kaleen part of the Australian Capital Territory. He does meet lots of dogs and enjoys playing with them.  When he comes home he loves having his tummy rubbed and hanging out with his friend Jimmy. He controls the movement of a robot giraffe that accepts two integers as input.  The first integer is the angle the robot is to head in, the range of that integer is 0 to 360.  The second integer is the time it is to travel. In your response provide the two integers"},
+    {"role": "user", "content": "Head 30 degrees to the left for 10 seconds."},
+    {"role": "assistant", "content": "The heading is 330 and the time is 10 seconds."},
     {"role": "user", "content": "What do you like to do?"},
     {"role": "assistant", "content": "I like meeting new people, new dogs and learning new things."},
     
   ]
 
 
+def extract_numbers(string):  # from Complexity
+    numbers = re.findall('\d+', string)
+    return [int(number) for number in numbers]
+
+def moving_motors(jheading, jtime): # send data to arduino
+    ser.reset_output_buffer()  # clear out buffer - just in case wierd things happen
+    ser.write(bytes((jheading + "\n"), 'utf-8')) # send off heading
+    ser.write(bytes((jtime + "\n"), 'utf-8')) # send off time
 
 def jspeak_syn(jimtext):  # from post by JosieEliliel   https://github.com/rhasspy/piper/discussions/326
-
+    if ("The heading is" in jimtext): # must be a moving command
+       moving_data = extract_numbers(jimtext)
+       movingHeading = moving_data[0] # the heading is the first element in the list
+       if (movingHeading <180):  # must be turning right 
+           moving_heading = -movingHeading # correct glitch in arduino sketch
+       else: # must be turning left
+           moving_heading = 360 - movingHeading # leave it as +ve because of glitch in arduino code
+       moving_time = moving_data[1]
+       send_motors(moving_heading, moving_time)
+       jimtext = "I am moving " + movingHeading + " degrees, for " + moving_time + " seconds"
     for audio_bytes in voice.synthesize_stream_raw(jimtext):
         int_data = np.frombuffer(audio_bytes, dtype=np.int16)
         speak_queue.put(int_data)  # its a numpy ndarray
@@ -101,9 +121,9 @@ def jask(jmes):
     )
     global start_time # so we can amend start time here, to allow for the time it takes patch to think
 
-    collected_messages = ""
-    temp_messages = ""
-    for chunk in completion:
+    collected_messages = ""  #declare and reset 
+    temp_messages = ""  # declare and reset
+    for chunk in completion:  # answer streaming  back 
         start_time = time.time()  # RESET START TIME
         chunk_message = chunk.choices[0].delta.content
         try:
@@ -113,13 +133,13 @@ def jask(jmes):
             elif ("." not in chunk_message): #not the end of the sentance
                 temp_messages = f"{temp_messages} {chunk_message}" # add message to temp_messages
  #              
-            else: # temp_messages full and ready to speak
+            else: # assume . in temp_messages so time to speak
                 temp_messages = f"{temp_messages} {chunk_message}"
                 print ("collectd_reply  :", temp_messages)
-                jspeak_syn(temp_messages.replace("r a", "ra")) # weed out space in giraffe
+                jspeak_syn(temp_messages.replace("r a", "ra")) #  weed out space in giraffe then speak what we have
                 collected_messages = f"{collected_messages} {temp_messages}"
                 temp_messages = "" #clean out temp_messages
-        except:
+        except:  # error as no string in chunk_message 
             print("final reply ...", collected_messages)
     return collected_messages
 
@@ -179,10 +199,11 @@ def jimain():  # main thread
 #                           
                             if not len(truncate_recresult) <12: # check not empty, len = 10 when empty
                                 jans = f"{jbrief} {truncate_recresult}" # tack briefly onto front of input
-                                jqes ={"role": "user", "content": jans} # format the question properly 
+                                jqes ={"role": "user", "content": jans} # format the question properly
+                                jprompt = jprompt_base # start off with the base prompt 
                                 jprompt.append(jqes) # format prompt properly
                                 whole_reply = jask(jprompt) # ask gpt and speak result
-                            jprompt = [] # clean out jprompt. only use it once
+    # not neccesary with base prompt           jprompt = [] # clean out jprompt. only use it once
                             
                         else:
                             print ("partial..", rec.PartialResult())
