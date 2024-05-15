@@ -28,6 +28,8 @@ input_queue = queue.Queue(maxsize=65) #input buffer for get next audio
 client = OpenAI() # initialise chatgpt, OPENAI_KEY is stored as an environment variable
 
 ser = serial.Serial('/dev/ttyACM0', 9600, timeout = 1) # start serial to arduino
+ser.reset_input_buffer()
+ser.reset_output_buffer()
 owwModel = Model(wakeword_models=["hay_Patch_large.tflite"], inference_framework = "tflite"  ) # openwakeword model
 
 voicedir = os.path.expanduser('~/') #Where piper onnx model files are stored
@@ -70,25 +72,39 @@ jprompt_base = [  # sets the context
   ]
 
 
-def extract_numbers(string):  # from Complexity
+def extract_numbers(string):  # from Complexity AI
     numbers = re.findall('\d+', string)
     return [int(number) for number in numbers]
 
-def moving_motors(jheading, jtime): # send data to arduino
-    ser.reset_output_buffer()  # clear out buffer - just in case wierd things happen
-    ser.write(bytes((jheading + "\n"), 'utf-8')) # send off heading
-    ser.write(bytes((jtime + "\n"), 'utf-8')) # send off time
+def moving_motors(jhead, jtim): # send data to arduino
+#    ser.reset_output_buffer()  # clear out buffer - just in case wierd things happen
+    jheading = str(jhead)  # have to send string over serial
+    jtime = str(jtim)
+    try:
+        ser.write(bytes((jheading + "\n"), 'utf-8')) # send off heading
+        ser.write(bytes((jtime + "\n"), 'utf-8')) # send off time
+    except:
+        print("just did not sent off comands")
+        print("jheading type ..", type(jheading))
+        time.sleep(1000)
 
-def jspeak_syn(jimtext):  # from post by JosieEliliel   https://github.com/rhasspy/piper/discussions/326
-    if ("The heading is" in jimtext): # must be a moving command
+
+
+def jspeak_syn(jimtext):  # from post by JosieEliliel   https://github.com/rhasspy/piper/discussions/326 
+    jimtext_s = jimtext.split()  # manoever to remove excess spaces
+    jimtext = " ".join(jimtext_s)  # put back in space
+    print ("jimtext is .. ", jimtext)
+#    time.sleep(5)
+    if ("heading is" in jimtext): # must be a moving command
        moving_data = extract_numbers(jimtext)
        movingHeading = moving_data[0] # the heading is the first element in the list
+
        if (movingHeading <180):  # must be turning right 
            moving_heading = -movingHeading # correct glitch in arduino sketch
        else: # must be turning left
            moving_heading = 360 - movingHeading # leave it as +ve because of glitch in arduino code
        moving_time = moving_data[1]
-       send_motors(moving_heading, moving_time)
+       moving_motors(moving_heading, moving_time)
        jimtext = "I am moving " + movingHeading + " degrees, for " + moving_time + " seconds"
     for audio_bytes in voice.synthesize_stream_raw(jimtext):
         int_data = np.frombuffer(audio_bytes, dtype=np.int16)
@@ -102,7 +118,6 @@ def speak_greeting():
 
 def jspeak():  # seperate thread
     while True:
-
         jaud = speak_queue.get() # wait until something appears in the queue
         patch_talking.set() # set the patch_talking flag to True
         stream.write(jaud) # send it off to the loudspeaker
@@ -136,6 +151,7 @@ def jask(jmes):
             else: # assume . in temp_messages so time to speak
                 temp_messages = f"{temp_messages} {chunk_message}"
                 print ("collectd_reply  :", temp_messages)
+  #              time.sleep(1000)
                 jspeak_syn(temp_messages.replace("r a", "ra")) #  weed out space in giraffe then speak what we have
                 collected_messages = f"{collected_messages} {temp_messages}"
                 temp_messages = "" #clean out temp_messages
@@ -180,15 +196,15 @@ def jimain():  # main thread
             if (prediction['hay_Patch_large'] > 0.5):  #wake word detected, started conversation
                 for x in range(10):
                     pcm = np.frombuffer(get_next_audio_frame(), dtype=np.int16) #dirty fix, clean out owwModel buffer so
-                    jprediction = owwModel.predict(pcm) #go past wake word
+                    jprediction = owwModel.predict(pcm) #go past wake word.  Otherwise the wake word stays in the buffer
                 speak_greeting()
                 start_time = time.time() # remember start time
                 while ((time.time() - start_time) < pause_time): #still in conversation
-                    print("in conversation", end="")
+#                    print("in conversation", end="")
         
                     if patch_talking.is_set() : # patch is talking, wait till he has finished before listening again
                         start_time = time.time() # reset start time 
-                        print ("patch talking", end ="")
+#                        print ("patch talking", end ="")
                      
                     else : #patch not talking so start listening
 
@@ -202,6 +218,8 @@ def jimain():  # main thread
                                 jqes ={"role": "user", "content": jans} # format the question properly
                                 jprompt = jprompt_base # start off with the base prompt 
                                 jprompt.append(jqes) # format prompt properly
+ #                               print ("prompt is ..", jprompt)
+ #                               time.sleep(1000)
                                 whole_reply = jask(jprompt) # ask gpt and speak result
     # not neccesary with base prompt           jprompt = [] # clean out jprompt. only use it once
                             
